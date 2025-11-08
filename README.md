@@ -1,5 +1,7 @@
 # try - fresh directories for every vibe
 
+*Your experiments deserve a home.* 🏠
+
 > For everyone who constantly creates new projects for little experiments, a one-file Ruby script to quickly manage and navigate to keep them somewhat organized
 
 Ever find yourself with 50 directories named `test`, `test2`, `new-test`, `actually-working-test`, scattered across your filesystem? Or worse, just coding in `/tmp` and losing everything?
@@ -21,8 +23,14 @@ Instantly navigate through all your experiment directories with:
 ```bash
 curl -sL https://raw.githubusercontent.com/tobi/try/refs/heads/main/try.rb > ~/.local/try.rb
 
+# Make "try" executable so it can be run directly
+chmod +x ~/.local/try.rb
+
 # Add to your shell (bash/zsh)
-echo 'eval "$(~/.local/try.rb init ~/src/tries)"' >> ~/.zshrc
+echo 'eval "$(ruby ~/.local/try.rb init ~/src/tries)"' >> ~/.zshrc
+
+# for fish shell users
+echo 'eval (~/.local/try.rb init ~/src/tries | string collect)' >> ~/.config/fish/config.fish
 ```
 
 ## The Problem
@@ -70,35 +78,77 @@ Not just substring matching - it's smart:
 
 ### Shell Integration
 
-Add to your `~/.bashrc` or `~/.zshrc`:
+- Bash/Zsh:
 
+  ```bash
+  # default is ~/src/tries
+  eval "$(~/.local/try.rb init)"
+  # or pick a path
+  eval "$(~/.local/try.rb init ~/src/tries)"
+  ```
 
+- Fish:
 
-```bash
-# default is ~/src/tries
-eval "$(~/.local/try.rb init)"
-```
+  ```fish
+  eval (~/.local/try.rb init | string collect)
+  # or pick a path
+  eval (~/.local/try.rb init ~/src/tries | string collect)
+  ```
 
-Or if you want to customize the location:
-
-```bash
-eval "$(~/.local/try.rb init ~/src/tries)"
-```
+Notes:
+- The runtime commands printed by `try` are shell-neutral (absolute paths, quoted). Only the small wrapper function differs per shell.
 
 ## Usage
 
 ```bash
-try                 # Browse all experiments
-try redis           # Jump to redis experiment or create new
-try new api         # Start with "2025-08-17-new-api"
-try --help          # See all options
+try                                          # Browse all experiments
+try redis                                    # Jump to redis experiment or create new
+try new api                                  # Start with "2025-08-17-new-api"
+try . [name]                                   # Create a dated worktree dir for current repo
+try ./path/to/repo [name]                      # Use another repo as the worktree source
+try worktree dir [name]                        # Same as above, explicit CLI form
+try clone https://github.com/user/repo.git  # Clone repo into date-prefixed directory
+try https://github.com/user/repo.git        # Shorthand for clone (same as above)
+try --help                                   # See all options
 ```
+
+Notes on worktrees (`try .` / `try worktree dir`):
+- With a custom [name], uses that; otherwise uses cwd’s basename. Both are prefixed with today’s date.
+- Inside a Git repo: adds a detached HEAD git worktree to the created directory.
+- Outside a repo: simply creates the directory and changes into it.
+
+### Git Repository Cloning
+
+**try** can automatically clone git repositories into properly named experiment directories:
+
+```bash
+# Clone with auto-generated directory name
+try clone https://github.com/tobi/try.git
+# Creates: 2025-08-27-tobi-try
+
+# Clone with custom name
+try clone https://github.com/tobi/try.git my-fork
+# Creates: my-fork
+
+# Shorthand syntax (no need to type 'clone')
+try https://github.com/tobi/try.git
+# Creates: 2025-08-27-tobi-try
+```
+
+Supported git URI formats:
+- `https://github.com/user/repo.git` (HTTPS GitHub)
+- `git@github.com:user/repo.git` (SSH GitHub)
+- `https://gitlab.com/user/repo.git` (GitLab)
+- `git@host.com:user/repo.git` (SSH other hosts)
+
+The `.git` suffix is automatically removed from URLs when generating directory names.
 
 ### Keyboard Shortcuts
 
-- `↑/↓` or `Ctrl-P/N` - Navigate
+- `↑/↓` or `Ctrl-P/N/J/K` - Navigate
 - `Enter` - Select or create
 - `Backspace` - Delete character
+- `Ctrl-D` - Delete directory (with confirmation)
 - `ESC` - Cancel
 - Just type to filter
 
@@ -111,6 +161,59 @@ export TRY_PATH=~/code/sketches
 ```
 
 Default: `~/src/tries`
+
+## Nix
+
+### Quick start
+
+```bash
+nix run github:tobi/try
+nix run github:tobi/try -- --help
+nix run github:tobi/try init ~/my-tries
+```
+
+### Home Manager
+
+```nix
+{
+  inputs.try.url = "github:tobi/try";
+  
+  imports = [ inputs.try.homeManagerModules.default ];
+  
+  programs.try = {
+    enable = true;
+    path = "~/experiments";  # optional, defaults to ~/src/tries
+  };
+}
+```
+
+## Homebrew
+
+### Quick start
+
+```bash
+brew tap tobi/try
+brew install try
+```
+
+After installation, add to your shell:
+
+- Bash/Zsh:
+
+  ```bash
+  # default is ~/src/tries
+  eval "$(try init)"
+  # or pick a path
+  eval "$(try init ~/src/tries)"
+  ```
+
+- Fish:
+
+  ```fish
+  eval "(try init | string collect)"
+  # or pick a path
+  eval "(try init ~/src/tries | string collect)"
+  ```
 
 ## Why Ruby?
 
