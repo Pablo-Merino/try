@@ -5,7 +5,9 @@ import (
     "errors"
     "fmt"
     "os"
+    "os/exec"
     "path/filepath"
+    "regexp"
     "sort"
     "strconv"
     "strings"
@@ -18,37 +20,67 @@ func uiPrint(text string, w *os.File) {
     if w == nil {
         w = os.Stderr
     }
-    replacer := strings.NewReplacer(
-        "{text}", "\x1b[39m",
-        "{dim_text}", "\x1b[90m",
-        "{h1}", "\x1b[1;33m",
-        "{h2}", "\x1b[1;36m",
-        "{highlight}", "\x1b[1;33m",
-        "{reset}", "\x1b[0m",
-        "{reset_bg}", "\x1b[49m",
-        "{clear_screen}", "\x1b[2J",
-        "{clear_line}", "\x1b[2K",
-        "{home}", "\x1b[H",
-        "{hide_cursor}", "\x1b[?25l",
-        "{show_cursor}", "\x1b[?25h",
-        "{start_selected}", "\x1b[6m",
-        "{end_selected}", "\x1b[0m",
-    )
-    _, _ = w.WriteString(replacer.Replace(text))
+
+    var output string
+    if isTTY(w) {
+        // For TTY: expand tokens to ANSI codes
+        replacer := strings.NewReplacer(
+            "{text}", "\x1b[39m",
+            "{dim_text}", "\x1b[90m",
+            "{h1}", "\x1b[1;33m",
+            "{h2}", "\x1b[1;36m",
+            "{highlight}", "\x1b[1;33m",
+            "{reset}", "\x1b[0m",
+            "{reset_bg}", "\x1b[49m",
+            "{reset_fg}", "\x1b[39m",
+            "{clear_screen}", "\x1b[2J",
+            "{clear_line}", "\x1b[2K",
+            "{home}", "\x1b[H",
+            "{hide_cursor}", "\x1b[?25l",
+            "{show_cursor}", "\x1b[?25h",
+            "{start_selected}", "\x1b[6m",
+            "{end_selected}", "\x1b[0m",
+        )
+        output = replacer.Replace(text)
+    } else {
+        // For non-TTY: strip all tokens
+        re := regexp.MustCompile(`\{[^}]*\}`)
+        output = re.ReplaceAllString(text, "")
+    }
+
+    _, _ = w.WriteString(output)
 }
 
 func printGlobalHelp(defaultPath string) {
-    uiPrint("{h1}try something!{text}\n\n", nil)
-    uiPrint("Lightweight experiments for people with ADHD\n\n", nil)
-    uiPrint("this tool is not meant to be used directly,\n", nil)
-    uiPrint("but added to your ~/.zshrc or ~/.bashrc:\n\n", nil)
-    uiPrint("  {highlight}eval \"$(#$0 init ~/src/tries)\"{text}\n\n", nil)
-    uiPrint("{h2}Usage:{text}\n", nil)
-    uiPrint("  init [--path PATH]  # Initialize shell function for aliasing\n", nil)
-    uiPrint("  cd [QUERY]          # Interactive selector; prints shell cd commands\n\n\n", nil)
-    uiPrint("{h2}Defaults:{text}\n", nil)
-    uiPrint("  Default path: {dim_text}~/src/tries{text} (override with --path on commands)\n", nil)
-    uiPrint("  Current default: {dim_text}"+defaultPath+"{text}\n", nil)
+    w := os.Stdout
+    uiPrint("{h1}try something!{reset}\n\n", w)
+    uiPrint("Lightweight experiments for people with ADHD\n\n", w)
+    uiPrint("this tool is not meant to be used directly,\n", w)
+    uiPrint("but added to your ~/.zshrc or ~/.bashrc:\n\n", w)
+    uiPrint("  {highlight}eval \"$(try init ~/src/tries)\"{reset}\n\n", w)
+    uiPrint("for fish shell, add to ~/.config/fish/config.fish:\n\n", w)
+    uiPrint("  {highlight}eval (try init ~/src/tries | string collect){reset}\n\n", w)
+    uiPrint("{h2}Usage:{text}\n\n", w)
+    uiPrint("  init [--path PATH]  # Initialize shell function for aliasing\n", w)
+    uiPrint("  cd [QUERY] [name?]  # Interactive selector; Git URL shorthand supported\n", w)
+    uiPrint("  clone <git-uri> [name]  # Clone git repo into date-prefixed directory\n", w)
+    uiPrint("  worktree dir [name]  # Create date-prefixed dir; add worktree from CWD if git repo\n", w)
+    uiPrint("  worktree <repo-path> [name]  # Same as above, but source repo is <repo-path>\n\n", w)
+    uiPrint("{h2}Clone Examples:{text}\n\n", w)
+    uiPrint("  try clone https://github.com/tobi/try.git\n", w)
+    uiPrint("  # Creates: 2025-08-27-tobi-try\n\n", w)
+    uiPrint("  try clone https://github.com/tobi/try.git my-fork\n", w)
+    uiPrint("  # Creates: my-fork\n\n", w)
+    uiPrint("  try https://github.com/tobi/try.git\n", w)
+    uiPrint("  # Shorthand for clone (same as first example)\n\n", w)
+    uiPrint("{h2}Worktree Examples:{text}\n\n", w)
+    uiPrint("  try worktree dir\n", w)
+    uiPrint("  # From current git repo, creates: 2025-08-27-repo-name and adds detached worktree\n\n", w)
+    uiPrint("  try worktree ~/src/github.com/tobi/try my-branch\n", w)
+    uiPrint("  # From given repo path, creates: 2025-08-27-my-branch and adds detached worktree\n\n", w)
+    uiPrint("{h2}Defaults:{reset}\n", w)
+    uiPrint("  Default path: {dim_text}~/src/tries{reset} (override with --path on commands)\n", w)
+    uiPrint("  Current default: {dim_text}"+defaultPath+"{reset}\n", w)
 }
 
 func isTTY(f *os.File) bool {
@@ -76,11 +108,20 @@ type selector struct {
     termH        int
     tries        []tryDir
     selected     *result
+    deleteStatus string
 }
 
 type result struct {
     Type string // "cd" or "mkdir"
     Path string
+}
+
+type task struct {
+    Type string // "target", "mkdir", "git-clone", "git-worktree", "touch", "cd", "echo"
+    Path string
+    URI  string // for git-clone
+    Repo string // for git-worktree
+    Msg  string // for echo
 }
 
 func newSelector(search, basePath string) *selector {
@@ -120,15 +161,15 @@ func (s *selector) run() (*result, error) {
         key := s.readKey()
         totalItems := len(s.getTries()) + 1
         switch key {
-        case "\x1b[A", "\x10": // Up or Ctrl-P
+        case "\x1b[A", "\x10", "\x0b": // Up or Ctrl-P or Ctrl-K
             if s.cursorPos > 0 {
                 s.cursorPos--
             }
-        case "\x1b[B", "\x0e": // Down or Ctrl-N
+        case "\x1b[B", "\x0e", "\n": // Down or Ctrl-N or Ctrl-J
             if s.cursorPos < totalItems-1 {
                 s.cursorPos++
             }
-        case "\r", "\n":
+        case "\r":
             tries := s.getTries()
             if s.cursorPos < len(tries) {
                 s.handleSelection(tries[s.cursorPos])
@@ -143,6 +184,11 @@ func (s *selector) run() (*result, error) {
                 s.inputBuffer = s.inputBuffer[:len(s.inputBuffer)-1]
             }
             s.cursorPos = 0
+        case "\x04": // Ctrl-D
+            tries := s.getTries()
+            if s.cursorPos < len(tries) {
+                s.handleDelete(tries[s.cursorPos], fd, st)
+            }
         case "\x03", "\x1b": // Ctrl-C or ESC
             return nil, nil
         default:
@@ -395,7 +441,12 @@ func (s *selector) render() {
         uiPrint(fmt.Sprintf("{dim_text}[%d-%d/%d]{text}\r\n", s.scrollOffset+1, end, total), nil)
     }
     uiPrint("{dim_text}"+sep+"{text}\r\n", nil)
-    uiPrint("{dim_text}↑↓: Navigate  Enter: Select  ESC: Cancel{text}", nil)
+    if s.deleteStatus != "" {
+        uiPrint("{highlight}"+s.deleteStatus+"{text}\r\n", nil)
+        s.deleteStatus = "" // Clear after displaying
+    } else {
+        uiPrint("{dim_text}↑↓/Ctrl-P,N,J,K: Navigate  Enter: Select  Ctrl-D: Delete  ESC: Cancel{text}\r\n", nil)
+    }
     os.Stderr.Sync()
 }
 
@@ -486,6 +537,53 @@ func (s *selector) handleCreateNew(fd int, st termState) {
     s.selected = &result{Type: "mkdir", Path: filepath.Join(s.basePath, name)}
 }
 
+func (s *selector) handleDelete(td tryDir, fd int, st termState) {
+    // Get size and file count
+    size := "???"
+    if out, err := exec.Command("du", "-sh", td.Path).Output(); err == nil {
+        parts := strings.Fields(string(out))
+        if len(parts) > 0 {
+            size = parts[0]
+        }
+    }
+
+    files := "???"
+    if out, err := exec.Command("sh", "-c", "find "+td.Path+" -type f | wc -l").Output(); err == nil {
+        files = strings.TrimSpace(string(out))
+    }
+
+    // Show confirmation dialog
+    uiPrint("{clear_screen}{home}", nil)
+    uiPrint("{h2}Delete Directory{text}\r\n\r\n", nil)
+    uiPrint("Are you sure you want to delete: {highlight}"+td.Basename+"{text}\r\n", nil)
+    uiPrint("  {dim_text}in "+td.Path+"{text}\r\n", nil)
+    uiPrint("  {dim_text}files: "+files+" files{text}\r\n", nil)
+    uiPrint("  {dim_text}size: "+size+"{text}\r\n\r\n", nil)
+    uiPrint("{highlight}Type {text}YES{highlight} to confirm: {text}", nil)
+    uiPrint("{show_cursor}", nil)
+    os.Stderr.Sync()
+
+    // Restore cooked mode for input
+    _ = setTermState(fd, &st.old)
+    reader := bufio.NewReader(os.Stdin)
+    line, _ := reader.ReadString('\n')
+    // Back to raw
+    _, _ = enableRaw(fd)
+    uiPrint("{hide_cursor}", nil)
+
+    confirmation := strings.TrimSpace(line)
+    if confirmation == "YES" {
+        if err := os.RemoveAll(td.Path); err != nil {
+            s.deleteStatus = "Error: " + err.Error()
+        } else {
+            s.deleteStatus = "Deleted: " + td.Basename
+            s.tries = nil // Clear cache to reload
+        }
+    } else {
+        s.deleteStatus = "Delete cancelled"
+    }
+}
+
 func getenv(k, def string) string {
     if v := os.Getenv(k); v != "" {
         return v
@@ -553,21 +651,230 @@ func main() {
         if tryPath != "" {
             pathArg = " --path \"" + tryPath + "\""
         }
-        fmt.Printf("try() {\n  script_path='%s';\n  cmd=$(\"$script_path\" cd%s \"$@\" 2>/dev/tty);\n  [ $? -eq 0 ] && eval \"$cmd\" || echo \"$cmd\";\n}\n", scriptPath, pathArg)
+
+        // Check if fish shell
+        shell := os.Getenv("SHELL")
+        if strings.Contains(shell, "fish") {
+            // Fish shell script
+            fmt.Printf("function try\n")
+            fmt.Printf("  set -l script_path \"%s\"\n", scriptPath)
+            fmt.Printf("  # Check if first argument is a known command\n")
+            fmt.Printf("  switch $argv[1]\n")
+            fmt.Printf("    case clone worktree init\n")
+            fmt.Printf("      set -l cmd (/usr/bin/env \"$script_path\"%s $argv 2>/dev/tty | string collect)\n", pathArg)
+            fmt.Printf("    case '*'\n")
+            fmt.Printf("      set -l cmd (/usr/bin/env \"$script_path\" cd%s $argv 2>/dev/tty | string collect)\n", pathArg)
+            fmt.Printf("  end\n")
+            fmt.Printf("  set -l rc $status\n")
+            fmt.Printf("  if test $rc -eq 0\n")
+            fmt.Printf("    if string match -r ' && ' -- $cmd\n")
+            fmt.Printf("      eval $cmd\n")
+            fmt.Printf("    else\n")
+            fmt.Printf("      printf %%s $cmd\n")
+            fmt.Printf("    end\n")
+            fmt.Printf("  else\n")
+            fmt.Printf("    printf %%s $cmd\n")
+            fmt.Printf("  end\n")
+            fmt.Printf("end\n")
+        } else {
+            // Bash/Zsh script
+            fmt.Printf("try() {\n")
+            fmt.Printf("  script_path='%s'\n", scriptPath)
+            fmt.Printf("  # Check if first argument is a known command\n")
+            fmt.Printf("  case \"$1\" in\n")
+            fmt.Printf("    clone|worktree|init)\n")
+            fmt.Printf("      cmd=$(/usr/bin/env \"$script_path\"%s \"$@\" 2>/dev/tty)\n", pathArg)
+            fmt.Printf("      ;;\n")
+            fmt.Printf("    *)\n")
+            fmt.Printf("      cmd=$(/usr/bin/env \"$script_path\" cd%s \"$@\" 2>/dev/tty)\n", pathArg)
+            fmt.Printf("      ;;\n")
+            fmt.Printf("  esac\n")
+            fmt.Printf("  rc=$?\n")
+            fmt.Printf("  if [ $rc -eq 0 ]; then\n")
+            fmt.Printf("    case \"$cmd\" in\n")
+            fmt.Printf("      *\" && \"*) eval \"$cmd\" ;;\n")
+            fmt.Printf("      *) printf %%s \"$cmd\" ;;\n")
+            fmt.Printf("    esac\n")
+            fmt.Printf("  else\n")
+            fmt.Printf("    printf %%s \"$cmd\"\n")
+            fmt.Printf("  fi\n")
+            fmt.Printf("}\n")
+        }
+
+    case "clone":
+        if len(args) == 0 {
+            fmt.Fprintln(os.Stderr, "Error: git URI required for clone command")
+            fmt.Fprintln(os.Stderr, "Usage: try clone <git-uri> [name]")
+            os.Exit(1)
+        }
+        gitURI := args[0]
+        customName := ""
+        if len(args) > 1 {
+            customName = strings.Join(args[1:], " ")
+        }
+
+        dirName := generateCloneDirectoryName(gitURI, customName)
+        if dirName == "" {
+            fmt.Fprintln(os.Stderr, "Error: Unable to parse git URI:", gitURI)
+            os.Exit(1)
+        }
+
+        fullPath := filepath.Join(tryPath, dirName)
+        tasks := []task{
+            {Type: "target", Path: fullPath},
+            {Type: "mkdir"},
+            {Type: "echo", Msg: "Using {highlight}git clone{reset_fg} to create this trial from " + gitURI + "."},
+            {Type: "git-clone", URI: gitURI},
+            {Type: "touch"},
+            {Type: "cd"},
+        }
+        emitTasksScript(tasks)
+
+    case "worktree":
+        if len(args) == 0 || args[0] == "dir" {
+            // try worktree dir [name]
+            var customName string
+            if len(args) > 0 && args[0] == "dir" {
+                customName = strings.Join(args[1:], " ")
+            } else {
+                customName = strings.Join(args, " ")
+            }
+
+            base := customName
+            if base == "" {
+                cwd, _ := os.Getwd()
+                base = filepath.Base(cwd)
+            }
+            base = strings.ReplaceAll(base, " ", "-")
+
+            datePrefix := time.Now().Format("2006-01-02")
+            base = resolveUniqueNameWithVersioning(tryPath, datePrefix, base)
+            dirName := datePrefix + "-" + base
+            fullPath := filepath.Join(tryPath, dirName)
+
+            tasks := []task{
+                {Type: "target", Path: fullPath},
+                {Type: "mkdir"},
+            }
+
+            // Check if CWD is a git repo
+            if _, err := os.Stat(".git"); err == nil {
+                cwd, _ := os.Getwd()
+                tasks = append(tasks, task{Type: "echo", Msg: "Using {highlight}git worktree{reset_fg} to create this trial from " + cwd + "."})
+                tasks = append(tasks, task{Type: "git-worktree"})
+            }
+
+            tasks = append(tasks, task{Type: "touch"}, task{Type: "cd"})
+            emitTasksScript(tasks)
+        } else {
+            // try worktree <repo-path> [name]
+            repoDir, _ := filepath.Abs(args[0])
+            customName := ""
+            if len(args) > 1 {
+                customName = strings.Join(args[1:], " ")
+            }
+
+            base := customName
+            if base == "" {
+                base = filepath.Base(repoDir)
+            }
+            base = strings.ReplaceAll(base, " ", "-")
+
+            datePrefix := time.Now().Format("2006-01-02")
+            base = resolveUniqueNameWithVersioning(tryPath, datePrefix, base)
+            dirName := datePrefix + "-" + base
+            fullPath := filepath.Join(tryPath, dirName)
+
+            tasks := []task{
+                {Type: "target", Path: fullPath},
+                {Type: "mkdir"},
+                {Type: "echo", Msg: "Using {highlight}git worktree{reset_fg} to create this trial from " + repoDir + "."},
+                {Type: "git-worktree", Repo: repoDir},
+                {Type: "touch"},
+                {Type: "cd"},
+            }
+            emitTasksScript(tasks)
+        }
+
     case "cd":
         search := strings.Join(args, " ")
-        sel := newSelector(search, tryPath)
-        res, _ := sel.run()
-        if res != nil {
-            parts := []string{}
-            parts = append(parts, "dir='"+res.Path+"'")
-            if res.Type == "mkdir" {
-                parts = append(parts, "mkdir -p \"$dir\"")
+
+        // Support: try . [name] and try ./path [name]
+        searchParts := strings.Fields(search)
+        if len(searchParts) > 0 && strings.HasPrefix(searchParts[0], ".") {
+            pathArg := searchParts[0]
+            customName := ""
+            if len(searchParts) > 1 {
+                customName = strings.Join(searchParts[1:], " ")
             }
-            parts = append(parts, "touch \"$dir\"")
-            parts = append(parts, "cd \"$dir\"")
-            fmt.Print(strings.Join(parts, " && "))
+
+            repoDir, _ := filepath.Abs(pathArg)
+            base := customName
+            if base == "" {
+                base = filepath.Base(repoDir)
+            }
+            base = strings.ReplaceAll(base, " ", "-")
+
+            datePrefix := time.Now().Format("2006-01-02")
+            base = resolveUniqueNameWithVersioning(tryPath, datePrefix, base)
+            dirName := datePrefix + "-" + base
+            fullPath := filepath.Join(tryPath, dirName)
+
+            tasks := []task{
+                {Type: "target", Path: fullPath},
+                {Type: "mkdir"},
+            }
+
+            // Only add worktree when a .git directory exists at that path
+            gitPath := filepath.Join(repoDir, ".git")
+            if _, err := os.Stat(gitPath); err == nil {
+                tasks = append(tasks, task{Type: "echo", Msg: "Using {highlight}git worktree{reset_fg} to create this trial from " + repoDir + "."})
+                tasks = append(tasks, task{Type: "git-worktree", Repo: repoDir})
+            }
+
+            tasks = append(tasks, task{Type: "touch"}, task{Type: "cd"})
+            emitTasksScript(tasks)
+            return
         }
+
+        // Git URL shorthand → clone workflow
+        if len(searchParts) > 0 && isGitURI(searchParts[0]) {
+            gitURI := searchParts[0]
+            customName := ""
+            if len(searchParts) > 1 {
+                customName = strings.Join(searchParts[1:], " ")
+            }
+
+            dirName := generateCloneDirectoryName(gitURI, customName)
+            if dirName == "" {
+                fmt.Fprintln(os.Stderr, "Error: Unable to parse git URI:", gitURI)
+                os.Exit(1)
+            }
+
+            fullPath := filepath.Join(tryPath, dirName)
+            tasks := []task{
+                {Type: "target", Path: fullPath},
+                {Type: "mkdir"},
+                {Type: "echo", Msg: "Using {highlight}git clone{reset_fg} to create this trial from " + gitURI + "."},
+                {Type: "git-clone", URI: gitURI},
+                {Type: "touch"},
+                {Type: "cd"},
+            }
+            emitTasksScript(tasks)
+        } else {
+            // Regular interactive selector
+            sel := newSelector(search, tryPath)
+            res, _ := sel.run()
+            if res != nil {
+                tasks := []task{{Type: "target", Path: res.Path}}
+                if res.Type == "mkdir" {
+                    tasks = append(tasks, task{Type: "mkdir"})
+                }
+                tasks = append(tasks, task{Type: "touch"}, task{Type: "cd"})
+                emitTasksScript(tasks)
+            }
+        }
+
     default:
         fmt.Fprintln(os.Stderr, "Unknown command:", cmd)
         printGlobalHelp(tryPath)
@@ -577,3 +884,176 @@ func main() {
 
 func max(a, b int) int { if a > b { return a }; return b }
 func min(a, b int) int { if a < b { return a }; return b }
+
+// Git URI parsing
+type gitInfo struct {
+    User string
+    Repo string
+    Host string
+}
+
+func parseGitURI(uri string) *gitInfo {
+    // Remove .git suffix if present
+    uri = strings.TrimSuffix(uri, ".git")
+
+    // https://github.com/user/repo
+    if strings.Contains(uri, "github.com/") {
+        parts := strings.Split(uri, "/")
+        if len(parts) >= 2 {
+            user := parts[len(parts)-2]
+            repo := parts[len(parts)-1]
+            return &gitInfo{User: user, Repo: repo, Host: "github.com"}
+        }
+    }
+
+    // git@github.com:user/repo
+    if strings.HasPrefix(uri, "git@") {
+        parts := strings.SplitN(uri, ":", 2)
+        if len(parts) == 2 {
+            host := strings.TrimPrefix(parts[0], "git@")
+            pathParts := strings.Split(parts[1], "/")
+            if len(pathParts) >= 2 {
+                user := pathParts[len(pathParts)-2]
+                repo := pathParts[len(pathParts)-1]
+                return &gitInfo{User: user, Repo: repo, Host: host}
+            }
+        }
+    }
+
+    // https://host/user/repo
+    if strings.HasPrefix(uri, "http://") || strings.HasPrefix(uri, "https://") {
+        parts := strings.Split(uri, "/")
+        if len(parts) >= 5 {
+            host := parts[2]
+            user := parts[3]
+            repo := parts[4]
+            return &gitInfo{User: user, Repo: repo, Host: host}
+        }
+    }
+
+    return nil
+}
+
+func isGitURI(arg string) bool {
+    if arg == "" {
+        return false
+    }
+    return strings.HasPrefix(arg, "http://") ||
+        strings.HasPrefix(arg, "https://") ||
+        strings.HasPrefix(arg, "git@") ||
+        strings.Contains(arg, "github.com") ||
+        strings.Contains(arg, "gitlab.com") ||
+        strings.HasSuffix(arg, ".git")
+}
+
+func generateCloneDirectoryName(gitURI, customName string) string {
+    if customName != "" {
+        return customName
+    }
+
+    parsed := parseGitURI(gitURI)
+    if parsed == nil {
+        return ""
+    }
+
+    datePrefix := time.Now().Format("2006-01-02")
+    return fmt.Sprintf("%s-%s-%s", datePrefix, parsed.User, parsed.Repo)
+}
+
+// Directory versioning/uniqueness
+func uniqueDirName(basePath, dirName string) string {
+    candidate := dirName
+    i := 2
+    for {
+        fullPath := filepath.Join(basePath, candidate)
+        if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+            break
+        }
+        candidate = fmt.Sprintf("%s-%d", dirName, i)
+        i++
+    }
+    return candidate
+}
+
+func resolveUniqueNameWithVersioning(basePath, datePrefix, base string) string {
+    initial := datePrefix + "-" + base
+    fullPath := filepath.Join(basePath, initial)
+    if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+        return base
+    }
+
+    // Check if base ends with digits
+    re := regexp.MustCompile(`^(.*?)(\d+)$`)
+    if matches := re.FindStringSubmatch(base); matches != nil {
+        stem := matches[1]
+        n, _ := strconv.Atoi(matches[2])
+        candidateNum := n + 1
+        for {
+            candidateBase := fmt.Sprintf("%s%d", stem, candidateNum)
+            candidateFull := filepath.Join(basePath, datePrefix+"-"+candidateBase)
+            if _, err := os.Stat(candidateFull); os.IsNotExist(err) {
+                return candidateBase
+            }
+            candidateNum++
+        }
+    }
+
+    // No numeric suffix; use -2 style uniqueness
+    fullName := uniqueDirName(basePath, datePrefix+"-"+base)
+    return strings.TrimPrefix(fullName, datePrefix+"-")
+}
+
+// Shell script emission
+func shellQuote(s string) string {
+    return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
+}
+
+func emitTasksScript(tasks []task) {
+    var targetPath string
+    for _, t := range tasks {
+        if t.Type == "target" {
+            targetPath = t.Path
+            break
+        }
+    }
+    if targetPath == "" {
+        return
+    }
+
+    var parts []string
+    q := shellQuote(targetPath)
+
+    for _, t := range tasks {
+        switch t.Type {
+        case "echo":
+            if t.Msg != "" {
+                // Expand tokens in message
+                replacer := strings.NewReplacer(
+                    "{highlight}", "\x1b[1;33m",
+                    "{reset_fg}", "\x1b[39m",
+                    "{text}", "\x1b[39m",
+                )
+                expanded := replacer.Replace(t.Msg)
+                m := shellQuote(expanded)
+                parts = append(parts, "echo "+m)
+            }
+        case "mkdir":
+            parts = append(parts, "mkdir -p "+q)
+        case "git-clone":
+            parts = append(parts, "git clone "+shellQuote(t.URI)+" "+q)
+        case "git-worktree":
+            if t.Repo != "" {
+                r := shellQuote(t.Repo)
+                parts = append(parts, "/usr/bin/env sh -c 'if git -C "+r+" rev-parse --is-inside-work-tree >/dev/null 2>&1; then repo=$(git -C "+r+" rev-parse --show-toplevel); git -C \"$repo\" worktree add --detach "+q+" >/dev/null 2>&1 || true; fi; exit 0'")
+            } else {
+                parts = append(parts, "/usr/bin/env sh -c 'if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then repo=$(git rev-parse --show-toplevel); git -C \"$repo\" worktree add --detach "+q+" >/dev/null 2>&1 || true; fi; exit 0'")
+            }
+        case "touch":
+            parts = append(parts, "touch "+q)
+        case "cd":
+            parts = append(parts, "cd "+q)
+        }
+    }
+
+    fmt.Print(strings.Join(parts, " \\\n  && "))
+}
